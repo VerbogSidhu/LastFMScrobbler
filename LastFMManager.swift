@@ -1,6 +1,16 @@
 import Foundation
 import CryptoKit
 
+extension String {
+    // Standard URL encoding doesn't cover all characters (like '+' and '&') that cause issues in Last.fm form data
+    func rfc3986Encoded() -> String {
+        let unreserved = "-._~/?"
+        let allowed = NSMutableCharacterSet.alphanumeric()
+        allowed.addCharacters(in: unreserved)
+        return self.addingPercentEncoding(withAllowedCharacters: allowed as CharacterSet) ?? self
+    }
+}
+
 @MainActor
 class LastFMManager: ObservableObject {
     @Published var isAuthenticated = false
@@ -8,6 +18,8 @@ class LastFMManager: ObservableObject {
     @Published var username: String?
     @Published var errorMessage: String?
     @Published var successMessage: String?
+    
+    @Published var isScrobbling = false
     
     private let baseURL = "https://ws.audioscrobbler.com/2.0/"
     
@@ -74,52 +86,67 @@ class LastFMManager: ObservableObject {
             return
         }
         
-        let tracksToScrobble = Array(tracks.prefix(count))
+        var tracksToScrobble = Array(tracks.prefix(count))
         if tracksToScrobble.isEmpty { return }
         
-        var params: [String: String] = [
-            "method": "track.scrobble",
-            "api_key": Config.lastFMApiKey,
-            "sk": sk
-        ]
-        
-        // Add batch parameters
-        // Note: Apple Music Recent Tracks API doesn't provide the exact timestamp played,
-        // so we will fake it by spacing them out backwards from the current time.
-        // In a real app, you might want to use a more persistent DB to track precise scrobble times
-        // or just submit them with recent timestamps.
-        
+        self.isScrobbling = true
+        var totalAccepted = 0
         var currentTimestamp = Int(Date().timeIntervalSince1970)
         
-        for (index, track) in tracksToScrobble.enumerated() {
-            let artist = track.attributes?.artistName ?? "Unknown Artist"
-            let title = track.attributes?.name ?? "Unknown Track"
-            let album = track.attributes?.albumName ?? ""
-            
-            params["artist[\(index)]"] = artist
-            params["track[\(index)]"] = title
-            params["album[\(index)]"] = album
-            params["timestamp[\(index)]"] = String(currentTimestamp)
-            
-            // Subtract typical song length for the next track's timestamp (e.g. 3 mins)
-            currentTimestamp -= 180 
-        }
+        // Last.fm limits batch scrobbles to 50 per request
+        let batchSize = 50
         
-        guard let request = createRequest(params: params, isPost: true) else { return }
-        
-        do {
-            let (data, _) = try await URLSession.shared.data(for: request)
-            let decoder = JSONDecoder()
-            let response = try decoder.decode(LastFMScrobbleResponse.self, from: data)
+        for batchStart in stride(from: 0, to: tracksToScrobble.count, by: batchSize) {
+            let batchEnd = min(batchStart + batchSize, tracksToScrobble.count)
+            let batch = Array(tracksToScrobble[batchStart..<batchEnd])
             
-            if let scrobbles = response.scrobbles?.attr {
-                self.successMessage = "Successfully scrobbled \(scrobbles.accepted) tracks!"
-            } else if let message = response.message {
-                self.errorMessage = "Scrobble Error: \(message)"
+            var params: [String: String] = [
+                "method": "track.scrobble",
+                "api_key": Config.lastFMApiKey,
+                "sk": sk
+            ]
+            
+            for (index, track) in batch.enumerated() {
+                let artist = track.attributes?.artistName ?? "Unknown Artist"
+                let title = track.attributes?.name ?? "Unknown Track"
+                let album = track.attributes?.albumName ?? ""
+                
+                params["artist[\(index)]"] = artist
+                params["track[\(index)]"] = title
+                params["album[\(index)]"] = album
+                params["timestamp[\(index)]"] = String(currentTimestamp)
+                
+                // Subtract 3 mins for fake timestamps going backwards
+                currentTimestamp -= 180 
             }
-        } catch {
-            self.errorMessage = "Failed to scrobble: \(error.localizedDescription)"
+            
+            guard let request = createRequest(params: params, isPost: true) else {
+                self.errorMessage = "Failed to construct scrobble request."
+                self.isScrobbling = false
+                return
+            }
+            
+            do {
+                let (data, _) = try await URLSession.shared.data(for: request)
+                let decoder = JSONDecoder()
+                let response = try decoder.decode(LastFMScrobbleResponse.self, from: data)
+                
+                if let scrobbles = response.scrobbles?.attr {
+                    totalAccepted += scrobbles.accepted
+                } else if let message = response.message {
+                    self.errorMessage = "Scrobble Error: \(message)"
+                    self.isScrobbling = false
+                    return
+                }
+            } catch {
+                self.errorMessage = "Failed to scrobble: \(error.localizedDescription)"
+                self.isScrobbling = false
+                return
+            }
         }
+        
+        self.successMessage = "Successfully scrobbled \(totalAccepted) tracks!"
+        self.isScrobbling = false
     }
     
     // MARK: - Helpers
@@ -136,7 +163,7 @@ class LastFMManager: ObservableObject {
             request.httpMethod = "POST"
             request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
             
-            let postString = allParams.map { "\($0.key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")" }.joined(separator: "&")
+            let postString = allParams.map { "\($0.key.rfc3986Encoded())=\($0.value.rfc3986Encoded())" }.joined(separator: "&")
             request.httpBody = postString.data(using: .utf8)
             return request
         } else {

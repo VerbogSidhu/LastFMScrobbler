@@ -31,9 +31,16 @@ struct ContentView: View {
                 } else {
                     // Main Interface
                     VStack(alignment: .leading) {
-                        Text("Ready to Scrobble")
-                            .font(.title2)
-                            .bold()
+                        HStack {
+                            Text("Ready to Scrobble")
+                                .font(.title2)
+                                .bold()
+                            Spacer()
+                            Button("Logout") {
+                                lastFMManager.logout()
+                            }
+                            .foregroundColor(.red)
+                        }
                         
                         Text("Logged in as \(lastFMManager.username ?? "Unknown")")
                             .foregroundColor(.secondary)
@@ -41,33 +48,48 @@ struct ContentView: View {
                         Divider()
                         
                         if appleMusicManager.recentTracks.isEmpty {
-                            Button("Fetch Recent Tracks") {
-                                Task { await appleMusicManager.fetchRecentlyPlayed() }
+                            if appleMusicManager.isFetching {
+                                ProgressView("Fetching History...")
+                                    .frame(maxWidth: .infinity, alignment: .center)
+                                    .padding()
+                            } else {
+                                Button("Fetch Recent Tracks") {
+                                    Task { await appleMusicManager.fetchRecentlyPlayed() }
+                                }
+                                .buttonStyle(.bordered)
+                                .frame(maxWidth: .infinity)
                             }
-                            .buttonStyle(.bordered)
                         } else {
                             Text("Found \(appleMusicManager.recentTracks.count) recent tracks.")
                             
-                            VStack(alignment: .leading) {
-                                Text("How many to scrobble? \(Int(scrobbleCount))")
-                                Slider(value: $scrobbleCount, in: 1...Double(max(1, appleMusicManager.recentTracks.count)), step: 1)
+                            if appleMusicManager.recentTracks.count > 0 {
+                                VStack(alignment: .leading) {
+                                    Text("How many to scrobble? \(Int(scrobbleCount))")
+                                    Slider(value: $scrobbleCount, in: 1...Double(appleMusicManager.recentTracks.count), step: 1)
+                                }
+                                .padding(.vertical)
                             }
-                            .padding(.vertical)
                             
-                            Button(action: {
-                                Task {
-                                    await lastFMManager.scrobble(tracks: appleMusicManager.recentTracks, count: Int(scrobbleCount))
+                            if lastFMManager.isScrobbling {
+                                ProgressView("Scrobbling to Last.fm...")
+                                    .frame(maxWidth: .infinity, alignment: .center)
+                                    .padding()
+                            } else {
+                                Button(action: {
+                                    Task {
+                                        await lastFMManager.scrobble(tracks: appleMusicManager.recentTracks, count: Int(scrobbleCount))
+                                    }
+                                }) {
+                                    HStack {
+                                        Image(systemName: "music.note")
+                                        Text("Scrobble to Last.fm")
+                                    }
+                                    .frame(maxWidth: .infinity)
                                 }
-                            }) {
-                                HStack {
-                                    Image(systemName: "music.note")
-                                    Text("Scrobble to Last.fm")
-                                }
-                                .frame(maxWidth: .infinity)
+                                .buttonStyle(.borderedProminent)
+                                .tint(.red)
+                                .controlSize(.large)
                             }
-                            .buttonStyle(.borderedProminent)
-                            .tint(.red)
-                            .controlSize(.large)
                             
                             List(Array(appleMusicManager.recentTracks.prefix(Int(scrobbleCount)))) { track in
                                 VStack(alignment: .leading) {
@@ -94,6 +116,12 @@ struct ContentView: View {
                             await lastFMManager.fetchSession(token: token)
                         }
                     }, isPresented: $showingLastFMLogin)
+                }
+            }
+            // Sync slider safely
+            .onChange(of: appleMusicManager.recentTracks.count) { newCount in
+                if newCount > 0 {
+                    scrobbleCount = min(5, Double(newCount))
                 }
             }
             .alert("Error", isPresented: Binding<Bool>(
